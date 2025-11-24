@@ -1,297 +1,98 @@
-\chapter{Novel Approaches and Proof of Validity}\label{chap:algorithms}
+\chapter{접근 방식}\label{chap:approach}
 
-This chapter presents our proposed approaches for solving general \(k\)-cluster problems in one dimension. We introduce two algorithms: the \textit{\(k\)-cluster algorithm} and the \textit{2-cluster algorithm}. Both methods exploit the structure of one-dimensional data and utilize sorting, prefix sums, and binary search to achieve significant computational efficiency compared to traditional clustering methods.
+본 연구의 접근 방식은 크게 두 단계로 구성된다. 첫째, AI 코딩 에이전트와의 상호작용 데이터를 다각도로 수집하기 위한 툴킷 'RetroChat'을 개발한다. 둘째, 수집된 데이터를 기반으로 'LLM-as-a-judge' 방법론을 활용하여 사용자의 AI 활용 능력을 평가하는 시스템을 구축한다.
 
-\paragraph{Finding Cluster Boundaries:}
-For one-dimensional data, determining a point's cluster assignment involves identifying the interval it falls into. The boundaries between clusters are the arithmetic midpoints of consecutive centroids. When both the data and centroids are sorted, these boundaries can be efficiently located using binary search, requiring $O(k \cdot \log n)$ time. If centroids need sorting, an additional $O(k \cdot \log k)$ time is needed; however, as $k \leq n$, the total time remains $O(k \cdot \log n)$. This approach forms the basis for subsequent optimizations.
+\section{RetroChat: 다면적 AI 코딩 채팅 분석 툴킷}\label{sec:retrochat}
 
-\section{The \(k\)-Cluster Algorithm}\label{sec:k_cluster_algorithm}
+사용자의 AI 활용 능력을 분석하기 위해서는 먼저 신뢰할 수 있는 원천 데이터의 확보가 필수적이다. 기존 도구들이 제공하는 정량적 지표만으로는 심층적인 분석이 불가능하다고 판단하여, 다면적인 정보를 수집할 수 있는 오픈소스 툴킷 'RetroChat'\footnote{\url{https://github.com/wafflestudio/retrochat}}을 설계 및 구현했다.
 
-The \(k\)-cluster algorithm is a one-dimensional adaptation of greedy $k$-means++ initialization followed by Lloyd’s algorithm iterations, and can be defined for both weighted and unweighted data. The algorithm leverages:
+\subsection{구현}
 
-\begin{enumerate}
-    \item \textbf{Sorted Data:} Sorting the input array \(X\) of size \(n\) in ascending order allows quick determination of cluster assignments via binary search on cluster boundaries.
-    \item \textbf{Prefix Sums:} Precomputing prefix sums enables constant-time computation of weighted and unweighted sums, means, and inertia values over arbitrary intervals. Specifically, for weighted data:
-    \[
-    W[j] = \sum_{i=1}^j w_i, \quad 
-    (WX)[j] = \sum_{i=1}^j w_i x_i, \quad 
-    (WX^2)[j] = \sum_{i=1}^j w_i x_i^2.
-    \]
-    For unweighted data, this simplifies to:
-    \[
-    X^{(1)}[j] = \sum_{i=1}^j x_i, \quad X^{(2)}[j] = \sum_{i=1}^j x_i^2.
-    \]
-    \item \textbf{Binary Search:} Binary search is central to efficiently determining cluster boundaries and performing weighted random sampling during initialization.
-\end{enumerate}
+'RetroChat'은 Rust 프로그래밍 언어와 Tauri 프레임워크를 기반으로 제작된 Desktop GUI 애플리케이션이다. 이는 직관적인 그래픽 인터페이스를 제공하여 사용자가 자신의 AI 상호작용 데이터를 쉽게 탐색하고 분석할 수 있도록 돕는다. 수집된 모든 사용자 데이터셋은 로컬 SQLite 데이터베이스에 저장되어, 데이터의 프라이버시를 보장하면서 효율적으로 관리된다.
 
-\subsection{WCSS and Prefix Sums}
+\subsection{주요 기능 및 특징}
 
-The within-cluster sum of squares (WCSS) for weighted data is defined as:
-\[
-\text{WCSS} = \sum_{i=1}^k \sum_{x_j \in C_i} w_j (x_j - \mu_i)^2,
-\]
-where \(C_i\) is the \(i\)-th cluster, \(\mu_i\) is its centroid, and \(w_j\) is the weight of point \(x_j\). Expanding the squared term:
-\[
-(x_j - \mu_i)^2 = x_j^2 - 2x_j\mu_i + \mu_i^2,
-\]
-yields:
-\[
-\text{WCSS}_i = \sum_{x_j \in C_i} w_j x_j^2 - 2\mu_i \sum_{x_j \in C_i} w_j x_j + \mu_i^2 \sum_{x_j \in C_i} w_j.
-\]
-
-Using prefix sums:
-\[
-\begin{aligned}
-\sum_{x_j \in C_i} w_j x_j^2 &= (WX^2)[b_i] - (WX^2)[b_{i-1}], \\
-\sum_{x_j \in C_i} w_j x_j &= (WX)[b_i] - (WX)[b_{i-1}], \\
-\sum_{x_j \in C_i} w_j &= W[b_i] - W[b_{i-1}].
-\end{aligned}
-\]
-
-where \(b_{i-1}\) and \(b_i\) are the cluster boundaries. The centroid is:
-\[
-\mu_i = \frac{(WX)[b_i] - (WX)[b_{i-1}]}{W[b_i] - W[b_{i-1}]}.
-\]
-
-All these queries take \(O(1)\) time per cluster once the prefix sums are computed. Hence, WCSS and centroid calculations are efficient, requiring only \(O(k)\) time across all $k$ clusters, if cluster boundaries are known. Determining cluster boundaries costs \(O(k \log n)\), so the total cost for WCSS calculation given centroids is \(O(k \log n)\).
-
-\subsection{Greedy $k$-Means++ Initialization}
-
-The $k$-means++ initialization selects centroids such that new centroids are chosen with probabilities proportional to their squared distances from the closest existing centroid. Our method efficiently implements this using \textbf{binary search} combined with \textbf{cumulative sum queries}.
-
-\paragraph{Steps for Initialization:}
-\begin{enumerate}
-    \item \textbf{First Centroid Selection:}
-    The first centroid is chosen randomly, weighted by the point weights \(w_j\). To achieve this:
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{다면적 데이터 수집:} 'RetroChat'은 단순한 채팅 로그(Chat History) 스크래핑을 넘어, AI 상호작용과 관련된 다양한 맥락 정보를 수집한다.
     \begin{itemize}
-        \item Given the cumulative sum of weights \(W[j] = \sum_{i=1}^j w_i\),
-        \item Generate a random number \(r \in [0, W[n]]\),
-        \item Perform binary search on \(W\) to find the smallest $j$ such that $W[j] \geq r$, and thus the corresponding point \(x_j\). This step costs \(O(\log n)\).
+        \item \textbf{Cost \& Token Usage:} API 호출에 따른 비용 및 토큰 사용량.
+        \item \textbf{File Changes:} AI의 제안이 실제 프로젝트 파일에 어떤 변경(추가, 삭제, 수정)을 가져왔는지 추적.
+        \item \textbf{Chat History:} 사용자와 AI 간의 전체 대화 내용.
+        \item \textbf{Tool Use:} AI 가 사용한 Tool 종류 별 사용 횟수.
     \end{itemize}
 
-    \item \textbf{Subsequent Centroid Selection:}
-    For each new centroid:
-    \begin{enumerate}
-        \item \textbf{Binary Search for Cluster Assignments:}
-        Given the existing centroids, determine the cluster boundaries using a binary search of consecutive centroid midpoints. This step costs \(O(k \log n)\).
+    \item \textbf{다양한 벤더사 지원:} 현업에서 사용되는 다양한 AI 코딩 에이전트를 지원하는 것을 목표로 한다. 현재 Claude Code, Gemini CLI, Codex 등 주요 벤더사의 채팅 로그 형식을 파싱하고 분석할 수 있다.
 
-        \item \textbf{Cumulative Sum for Squared Distances:}
-        To sample a new centroid, we need the cumulative sum of squared distances \(D_i^2\), where \(D_i\) is the distance of \(x_i\) to its closest centroid. The cumulative sum \(S[j]\) is defined as:
-        \[
-        S[j] = \sum_{i=1}^j D_i^2.
-        \]
-        \textbf{Importantly:} \(S\) is not explicitly constructed. Instead for each query $j$ on $S$:
-        \begin{itemize}
-            \item The sum of squared distances \(D_i^2\) are obtained using prefix sums over the \(k\) clusters, up to the $j$th point. This is equivalent to calculating the WCSS up to the $j$th point. For each cluster, this sum can be retrieved in $O(1)$ time, as the cluster boundaries are known. 
-            \item Querying \(S[j]\) for any \(j\) requires \(O(k)\) time, as it aggregates contributions from all relevant clusters.
-        \end{itemize}
-
-        \item \textbf{Binary Search on \(S\):}
-        \begin{itemize}
-            \item Generate a random number \(r \in [0, S[n]]\),
-            \item Perform binary search on \(S\) to find the smallest \(j\) such that \(S[j] \geq r\).
-        \end{itemize}
-        Each binary search involves \(O(\log n)\) queries of \(S\), where each query takes \(O(k)\). Thus, the total cost for sampling one new centroid is \(O(k \cdot \log n)\), and for $l$ candidates, $O(l \cdot k \cdot \log n)$.
-
-        \item \textbf{Greedy Candidate Selection:}
-        For each candidate:
-        \begin{itemize}
-            \item Update cluster boundaries using binary search (\(O(k \cdot \log n)\)),
-            \item Compute the total WCSS using prefix sums (\(O(k)\)).
-        \end{itemize}
-        The candidate minimizing the total WCSS is selected as the next centroid. For \(l\) candidates, this step costs \(O(l \cdot k \cdot \log n)\).
-
-        \item \textbf{Combined Initialization Time Complexity:}
-        Combining the steps, the total cost for generating and evaluating \(l\) candidates per new centroid is $O(k \cdot \log n \cdot + l \cdot k \cdot \log n + l \cdot k \cdot \log n) = O(l \cdot k \cdot \log n)$.
-    \end{enumerate}
+    \item \textbf{LLM-as-a-judge 기반 리포트화:} 수집된 원천 데이터를 단순히 나열하는 것이 아니라, 후술할 \ref{sec:llm_judge}절의 LLM-as-a-judge 방법론을 내장하여, 수집된 데이터를 바탕으로 사용자의 상호작용 패턴을 분석하고 평가하는 요약 리포트를 생성한다.
 \end{enumerate}
 
-\subsection{Complexity Analysis}
+\begin{figure}[H]
+    \centering
+    \begin{subfigure}[b]{\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/retrochat_chat_session.png}
+        \caption{채팅 세션 목록 화면}
+    \end{subfigure}
 
-The overall time complexity of the \(k\)-cluster algorithm is as follows:
+    \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/retrochat_chat_analysis_1.png}
+        \caption{분석 결과 화면 1}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/retrochat_chat_analysis_2.png}
+        \caption{분석 결과 화면 2}
+    \end{subfigure}
 
-\paragraph{Greedy $k$-Means++ Initialization:}
-As detailed in the previous section:
-\begin{itemize}
-    \item Selecting the first centroid using weighted sampling costs \(O(\log n)\),
-    \item Each subsequent centroid requires \(O(l \cdot k \cdot \log n)\), where \(l\) is the number of local trials.
-\end{itemize}
-The total cost for initialization across \(k\) centroids is therefore:
-\[
-O(l \cdot k^2 \cdot \log n).
-\]
+    \caption{RetroChat 사용자 화면. 채팅 세션 목록 및 분석 결과 화면}
+    \label{fig:retrochat}
+\end{figure}
 
-\paragraph{Lloyd’s Algorithm Iterations:}
-Each iteration of Lloyd’s algorithm consists of:
-\begin{itemize}
-    \item Updating cluster boundaries via binary search: \(O(k \cdot \log n)\),
-    \item Updating centroids using prefix sums: \(O(k)\).
-\end{itemize}
-For \(i\) iterations, the total cost is:
-\[
-O(i \cdot k \cdot \log n).
-\]
+\section{LLM-as-a-judge 기반 사용자 AI 활용 능력 평가}\label{sec:llm_judge}
 
-\paragraph{Overall Time Complexity:}
-The combined cost of greedy $k$-means++ initialization and Lloyd’s algorithm is:
-\[
-O(l \cdot k^2  \cdot \log n) + O(i \cdot k \cdot \log n).
-\]
+'RetroChat'을 통해 수집된 채팅 히스토리 데이터는 사용자의 AI 활용 능력을 평가하기 위한 핵심 원천 데이터가 된다. 본 연구는 이 정성적인 텍스트 데이터를 평가하기 위해 'LLM-as-a-judge' 방법론\footnote{\url{https://github.com/sanggggg/retrochat-evalutator}}을 도입했다. 이는 관련 연구인 SPUR가 사용자의 '선호도'를 예측한 것과 달리, 사용자의 '활용 능력(Proficiency)'을 학습 시점에 정량적으로 직접 정의하고 측정 및, 긍정적이거나 부정적인 부분을    판단하여 사용자에게 전달하는 것에 중점을 둔다.
 
-This does not account for the initial overhead of sorting the data and calculating prefix sums, which cost $O(n \log n)$ and $O(n)$, respectively.
+\subsection{평가 시스템 구축 과정}
 
-Comparing against conventional implementations of $O(l \cdot k \cdot n) + O(i \cdot k \cdot n)$, note how the dependence on $n$ (dataset size) has decreased, at the cost of quadratic complexity in $k$ during initialization. However, since $k \ll n$ in most practical cases, this tradeoff is justified. For experimental speedup proofs, see Chapter~\ref{chap:experiments}.
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{지도 학습 기반의 AI 활용 능력 루브릭(Rubric) 자동 도출 파이프라인:} 본 연구는 사람이 사전에 루브릭을 정의하는 대신, \ref{sec:chat_eval}절에서 언급된 SPUR 방법론과 유사하게 LLM이 스스로 루브릭을 학습하고 도출하는 방식을 채택한다. 이를 위해 세션의 효율성을 확인할 수 있는 목적 지표들이 함께 주어진 AI 코딩 에이전트 채팅 히스토리 데이터셋을 활용한다. (본 논문에서는 토큰 효율성, 사용자 피드백 효율성 두 가지 목적 지표를 판단하는 루브릭을 도출한다). 지도 학습 파이프라인은 이 데이터셋을 활용하여, 각 판단 지표 별 핵심적인 특징(feature)들을 스스로 학습하여 이를 평가 루브릭으로 생성한다. 예를 들어, LLM은 높은 토큰 활용도의 세션에서 공통적으로 발견되는 '명확한 요구사항 제시', '충분한 맥락 정보 제공', 'AI 제안에 대한 비판적 피드백' 등의 패턴을 학습하여, 이를 '요구사항의 명확성 (Clarity of Prompt)', '맥락 제공 (Context Provision)', '도구 효율적 사용 (Efficient Tool Utilization)' 등의 평가 루브릭으로 생성한다.
 
-\section{The 2-Cluster Algorithm}
+    \item \textbf{루브릭 기반의 LLM-as-a-judge 평가:} LLM에 의해 자동 도출된 루브릭을 기반으로, LLM (예: gemini-2.5-flash~\cite{gemini2p5})이 '평가자(Judge)' 역할을 수행하도록 하는 프롬프트를 설계한다. 이 프롬프트는 LLM에게 특정 채팅 히스토리 세션을 입력하여, 학습된 각 루브릭 항목별로 1\textasciitilde5점 척도의 점수를 매기고 그 근거를 서술하도록 지시한다.
 
-For the 2-cluster problem in one-dimensional sorted data, the task reduces to finding a single \textbf{cluster boundary} that divides the data into two contiguous clusters. To efficiently locate this boundary, we iteratively refine a \textbf{search scope} to identify the correct \textbf{division interval}. A division interval is defined as the interval between two consecutive points in the sorted data that contains the cluster boundary.
-
-\textbf{Note:} For all discussions in this section, all notions of direction (i.e., left or right) are with respect to the one-dimensional coordinate axis along which the data points are sorted. Thus, \emph{left} refers to decreasing \(x\)-values and \emph{right} refers to increasing \(x\)-values.
-
-\subsection{Definitions and Key Observations}
-
-\begin{itemize}
-    \item A \textbf{division interval} is defined as the interval between two consecutive points \(x_{\text{div\_left}}\) and \(x_{\text{div\_right}}\) in sorted data that contains the cluster boundary (note that, of course, $\text{div\_left} + 1 = \text{div\_right}$).
-    \item The \textbf{midpoint} for a division interval is defined as:
-    \[
-    \text{Midpoint} = \frac{\mu_{\text{left}} + \mu_{\text{right}}}{2},
-    \]
-    where \(\mu_{\text{left}}\) and \(\mu_{\text{right}}\) are the centroids of the left and right clusters defined by the division interval, respectively. These centroids are computed with prefix sums, using:
-    \[
-    \mu_{\text{left}} = \frac{\sum_{i=1}^{\text{div\_left}} w_i x_i}{\sum_{i=1}^{\text{div\_left}} w_i}, \quad 
-    \mu_{\text{right}} = \frac{\sum_{i=\text{div\_right}}^n w_i x_i}{\sum_{i=\text{div\_right}}^n w_i}.
-    \]
-    The prefix sums $W$ and $WX$, as defined for the $k$-cluster algorithm, allow this calculation to be done in $O(1)$ time.
-    \item A division interval is classified as follows:
-        \begin{itemize}
-            \item \textbf{Right-pointing:} The midpoint lies to the right of \(x_{\text{div\_right}}\).
-            \item \textbf{Left-pointing:} The midpoint lies to the left of \(x_{\text{div\_left}}\).
-            \item \textbf{Convergent:} The midpoint lies within the division interval itself, indicating a Lloyd’s algorithm convergence.
-        \end{itemize}
-    Note that every division interval can be classified into exactly one of these three categories.
-
-    \item The \textbf{search scope} refers to the range of candidate division intervals, which is iteratively refined during the binary search to locate a convergent interval.
-\end{itemize}
-
-\subsection{Algorithm Description}
-
-The algorithm aims to identify the correct division interval (i.e., a convergent interval) using binary search. The key steps are as follows:
-
-\begin{enumerate}
-    \item \textbf{Initialize the Search Scope:}  
-    Start with the whole scope---that is, all possible division intervals ranging from the first interval \([x_1, x_2]\) to the last interval \([x_{n-1}, x_n]\).
-
-    \item \textbf{Iteratively Query the Center Interval:}  
-    At each step:
-    \begin{itemize}
-        \item Select the \textbf{center division interval} within the current search scope.
-        \item Compute the centroids \(\mu_{\text{left}}\) and \(\mu_{\text{right}}\) and calculate the midpoint:
-        \[
-        \text{Midpoint} = \frac{\mu_{\text{left}} + \mu_{\text{right}}}{2}.
-        \]
-    \end{itemize}
-
-    \item \textbf{Refine the Search Scope:}
-    Compare the midpoint to the endpoints $x_{\text{div\_left}}$ and $x_{\text{div\_right}}$ of the queried division interval:
-    \begin{itemize}
-        \item If the interval is \textbf{right-pointing}, exclude all intervals to the left of the current interval, including itself.
-        \item If the interval is \textbf{left-pointing}, exclude all intervals to the right of the current interval, including itself.
-        \item If the interval is \textbf{convergent}, terminate; the cluster boundary has been found.
-    \end{itemize}
-
-    \item \textbf{Repeat Until Convergence:}  
-    Continue the process until a convergent interval is found.
+    \item \textbf{점수화 시스템 구축:} 2단계에서 LLM-as-a-judge 방법으로 도출한 각 루브릭별 점수(1\textasciitilde5점 척도)는 사용자의 AI 활용 능력을 세부적으로 진단하는 개별 지표로 활용된다. 또한 이 개별 루브릭 점수들의 산술 평균(arithmetic mean)을 계산하여 목적 지표에 대한 예측의 정확성을 검증하는 수단으로도  활용한다. 이 방식은 사용자에게 자신의 강점과 약점이 어떤 루브릭 항목에 있는지 직관적으로 파악하게 함과 동시에, 전반적인 활용 수준을 하나의 점수로 요약하여 검증의 신뢰도를 높이는 데 도움을 준다.
 \end{enumerate}
 
-The binary search guarantees that the number of candidate intervals is halved at each iteration, ensuring \(O(\log n)\) convergence.
+\subsection{지도 학습 기반의 AI 활용 능력 루브릭(Rubric) 자동 도출: 훈련 파이프라인 구현 세부}\label{sec:training_impl}
 
-\subsection{Proof of Validity}
+진행한 훈련의 목적은 정량적 토큰 효율, 사용자 턴 효율 등 세션의 효율성을 확인할 수 있는 지표들을 높은 정확도로 예측해 낼 수 있는 루브릭을 자동으로 도출하는 것이다.
 
-To prove the correctness of the algorithm, we rely on the monotonic behavior of the centroids’ midpoint and the structure of the division intervals.
+훈련 파이프라인은 대략 다음과 같다. 훈련 데이터 셋에서 목적 지표가 높은 상위 퍼센타일 (상위 15\%) 세션을 선별한 후, 각 세션을 구조화된 대화 세션 JSON 으로 변환한 뒤 루브릭 추출 프롬프트 템플릿을 사용하여 LLM 으로 루브릭을 추출한다. 이후 각 세션 별로 만들어진 3\textasciitilde5개의 루브릭 들을 두 가지 요약 전략(LLM 요약 프롬프트 템플릿을 통한 요약 또는 텍스트 임베딩을 통한 의미론적 클러스터링)을 통해 최종 루브릭을 생성한다. 세부 단계는 다음과 같다
 
-\paragraph{1. Monotonic Behavior of the Midpoint:}  
-When the division interval \([x_{\text{div\_left}}, x_{\text{div\_right}}]\) is shifted one step to the right, i.e., to \([x_{\text{div\_right}}, x_{\text{div\_right} + 1}]\):
-\begin{itemize}
-    \item The point \(x_{\text{div\_right}}\), which was previously the leftmost point in the right cluster, is excluded from the right cluster and added to the left cluster.
-    \item This change causes the \textbf{left centroid} \(\mu_{\text{left}}\) to increase, as a point with a larger value has been included in the left cluster.
-    \item Simultaneously, the \textbf{right centroid} \(\mu_{\text{right}}\) also increases, as the smallest point in the right cluster has been removed.
-    \item Since both centroids increase, the new \textbf{midpoint}:
-    \[
-    \text{Midpoint}^{\text{new}} = \frac{\mu_{\text{left}}^{\text{new}} + \mu_{\text{right}}^{\text{new}}}{2}
-    \]
-    is greater than the old midpoint:
-    \[
-    \text{Midpoint}^{\text{new}} > \text{Midpoint}^{\text{old}}.
-    \]
-\end{itemize}
+\paragraph{세션 로딩 및 필터링} 데이터셋에서 점수를 기반으로 상위 15\% 퍼센타일을 계산하고, 학습/검증 분리를 유지한 채 필요한 세션만 불러온다. 이를 통해 대규모 로그 중에서도 신뢰도 높은 세션만 선별적으로 학습에 투입한다.
 
-Similarly, shifting the division interval one step to the left causes the midpoint to strictly decrease.
+\paragraph{루브릭 추출} 루브릭 추출기는 각 세션을 JSON 문맥으로 포맷하고, 최소·최대 루브릭 개수를 명시해 Gemini 2.5 Flash 모델과 별도의 루브릭 추출 스크립트로 루브릭을 추출한다. 추출 결과는 JSON 배열 형태로 세션당 0\textasciitilde5개의 루브릭을 확보한다. 루브릭 추출 스크립트의 전체 구현 및 프롬프트 템플릿은 부록~\ref{appendix:rubric-extraction}에 수록하였다.
 
-\paragraph{2. Behavior of Right-Pointing and Left-Pointing Intervals:}  
-The monotonic behavior of the midpoint ensures the following:
+\paragraph{루브릭 통합} 수집된 수십\textasciitilde수백 개의 루브릭은 두 가지 전략으로 정제된다. 기본 전략은 요약 전용 프롬프트를 사용해 3\textasciitilde10개의 대표 기준으로 재구성하는 방식이며, context window가 과도하게 큰 경우 SPUR와 유사한 형태로 재귀적으로 100개 단위로 분할하여 summarize를 수행한다. 다른 전략은 Google 텍스트 임베딩 모델 gemini-embedding-001~\cite{gemini-embedding-001} 과 UMAP + HDBSCAN을 결합한 의미론적 클러스터링을 적용해 유사 루브릭을 자동 병합한다. UMAP을 통한 차원 축소와 HDBSCAN 클러스터링의 조합은 밀도에 따른 유연한 군집화와 고차원 임베딩 데이터에 대한 원활한 클러스터링을 가능하게 한다~\cite{hdbscan}. 군집 크기는 패턴의 빈도를 의미하므로 사용자의 공통 행동 양상이 자연스럽게 강조된다. 요약 전용 프롬프트를 통한 루브릭 통합 과정의 세부 구현 및 실제 프롬프트는 부록~\ref{appendix:rubric-merge}에 추가로 수록하였다.
 
-\begin{itemize}
-    \item \textbf{Right-Pointing Intervals:}  
-    Suppose a division interval \([x_{\text{div\_left}}, x_{\text{div\_right}}]\) is right-pointing, so:
-    \[
-    x_{\text{div\_right}} < \text{Midpoint}^{\text{old}}.
-    \]
-    After shifting the interval one step to the right to the new interval \([x_{\text{div\_right}}, x_{\text{div\_right+1}}]\), the corresponding new midpoint strictly increases:
-    \[
-    x_{\text{div\_right}} < \text{Midpoint}^{\text{old}} < \text{Midpoint}^{\text{new}}.
-    \]
-    For the new interval  \([x_{\text{div\_right}}, x_{\text{div\_right+1}}]\) to become left-pointing, the new midpoint, $\text{Midpoint}^{\text{new}}$, would have to be less than \(x_{\text{div\_right}}\). But directly from the inequality above:
-    \[
-    x_{\text{div\_right}} < \text{Midpoint}^{\text{new}}.
-    \]
-    Thus, a right-pointing interval cannot suddenly become left-pointing after a rightward shift; it remains right-pointing or becomes convergent.
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/rubric_extraction.png}
+    \caption{지도 학습 기반의 Rubric 자동 도출 과정}
+    \label{fig:rubric_extraction}
+\end{figure}
 
-    \item \textbf{Left-Pointing Intervals:}  
-    By a symmetric argument, for a left-pointing interval, shifting one step to the left strictly decreases the midpoint, ensuring it cannot suddenly become right-pointing. Instead, it remains left-pointing or becomes convergent.
-\end{itemize}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/rubric_summarization.png}
+    \caption{루브릭 통합 과정 (LLM 요약 및 의미론적 클러스터링)}
+    \label{fig:rubric_summarization}
+\end{figure}
 
-This ensures that from the perspective of shifting the intervals (one step at a time in the chosen direction), right-pointing and left-pointing intervals cannot directly switch roles in a single move.
-
-\paragraph{Convergent Interval in a Search Scope}
-In any search scope where the first interval is right-pointing and the last interval is left-pointing, there must exist at least one convergent interval between them. This follows from the fact that a right-pointing interval cannot immediately precede a left-pointing interval when moving stepwise to the right.
-
-\paragraph{Convergence of the Binary Search}
-For the entire search scope, the first division interval (between \(x_1\) and \(x_2\)) is either right-pointing or convergent, and the last division interval (between \(x_{n-1}\) and \(x_n\)) is either left-pointing or convergent. Therefore, by the principle established above, there must exist at least one convergent interval within the entire scope. The previously detailed binary search iteratively reduces this scope in a way such that a convergent interval is always included, eventually narrowing the scope to a single convergent interval.
-
-\subsection{Limitations}
-While the monotonicity argument ensures that right-pointing and left-pointing intervals cannot directly switch roles when shifting in the direction they point (rightward for right-pointing, leftward for left-pointing), this guarantee does not hold when shifting in the opposite direction. Multiple local minima in Lloyd’s algorithm can produce patterns like:
-\[
-RRRCLLLRRRCLLL,
-\]
-where \(R\) denotes right-pointing, \(L\) denotes left-pointing, and \(C\) denotes convergent intervals. In such scenarios:
-\begin{itemize}
-    \item Moving a left-pointing interval to the right can produce a right-pointing interval (and vice versa).
-    \item The algorithm still finds at least one convergent interval in \(O(\log n)\) time, but the found cluster boundary may correspond to a local minimum rather than the global optimum.
-\end{itemize}
-
-\subsection{Algorithm Guarantees}
-
-By leveraging the monotonic behavior of the midpoint and the fact that a convergent interval must exist between the first right-pointing and last left-pointing intervals, the binary search efficiently identifies a convergent interval representing a cluster boundary. The algorithm achieves this in \(O(\log n)\) time without relying on iterative steps of Lloyd's algorithm.
-
-In the presence of multiple local minima, the algorithm is guaranteed to converge to a valid solution, though it may not necessarily find the global optimum. Similar to the \(k\)-cluster algorithm, an initial preprocessing step is required, which includes sorting the data in \(O(n \log n)\) time and computing prefix sums in \(O(n)\) time.
-
-
-\section{Summary}
-
-In this chapter, we introduced two novel algorithms for solving the \(k\)-cluster problem in one-dimensional sorted data: the \textbf{\(k\)-cluster algorithm} and the \textbf{2-cluster algorithm}. Both methods leverage key observations about the structure of one-dimensional data to achieve significant computational efficiency.
-
-\begin{itemize}
-    \item The \textbf{\(k\)-cluster algorithm} combines greedy $k$-means++ initialization with efficient Lloyd’s iterations. By exploiting sorted data, prefix sums, and binary search:
-        \begin{itemize}
-            \item The initialization process achieves a complexity of \(O(l \cdot k^2 \cdot \log n)\), where \(k\) is the number of clusters and \(l\) is the number of local trials.
-            \item Each iteration of Lloyd’s algorithm requires \(O(k \log n)\) time, ensuring efficient updates of cluster boundaries and centroids.
-        \end{itemize}
-
-    \item The \textbf{2-cluster algorithm} focuses on the specific case of \(k=2\), where the problem reduces to locating a single cluster boundary. Using a binary search over division intervals:
-        \begin{itemize}
-            \item The midpoint of centroids behaves monotonically, allowing us to refine the search scope iteratively.
-            \item The algorithm achieves a total complexity of \(O(\log n)\) and guarantees convergence to a local minimum of Lloyd's algorithm.
-        \end{itemize}
-\end{itemize}
-
-Both algorithms demonstrate how the structure of one-dimensional data enables faster computations compared to traditional clustering methods. In cases with multiple local minima, the solutions produced may not be globally optimal---a limitation shared with Lloyd's algorithm. Nonetheless, the proposed methods strike an effective balance between accuracy and computational efficiency, making them highly suitable for practical applications.
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/scoring_unseen_chat_session.png}
+    \caption{학습된 Rubric 기반의 채팅 평가}
+    \label{fig:chat_assessment}
+\end{figure}

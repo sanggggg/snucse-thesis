@@ -1,64 +1,122 @@
-\chapter{Experiments}\label{chap:experiments}
+\chapter{평가}\label{chap:experiments}
 
-This chapter presents experimental results comparing the proposed 1D $k$-means algorithms against the widely used \texttt{scikit-learn} implementation. The evaluation focuses on runtime performance and clustering quality, using both real and synthetic datasets.
+\section{평가 및 학습용 데이터셋 구축}\label{sec:dataset}
 
-\section{Implementation Details}
+\subsection{원천 데이터 구성}
 
-\sloppy
-The proposed algorithms have been implemented as an open-source Python package, \texttt{flash1dkmeans}, available on GitHub\footnote{\url{https://github.com/SyphonArch/flash1dkmeans}} and PyPI\footnote{\url{https://pypi.org/project/flash1dkmeans/}}. The package is built on top of \texttt{NumPy} \cite{numpy} and \texttt{Numba} \cite{numba} for efficient computation. The implementation includes both the $k$-cluster and 2-cluster algorithms, as well as the preprocessing steps for the sorting and prefix sum computations. The preprocessing step is optional and can be disabled if the input data is already in adequate form. More details on the implementation can be found in the Appendix.
+RetroChat-Evaluator 저장소에는 매니페스트 생성 스크립트가 포함되어 있으며, Claude Code JSONL 로그를 재귀적으로 훑어 세션별 메타데이터와 점수를 생성한다. 실험에 사용된 원천 데이터는 10명의 Vibe Coders 를 통해 확보한 1{,}000개의 Claude Code 세션으로 구성되어 있으며, 모든 세션이 사용자 로컬에서 추출한 JSONL 파일 형태로 제공된다. 이 스크립트는 각 파일의 토큰 사용량, 도구 호출 횟수, 사용자 턴 수, 코드 변경(편집/작성 지시)에서 추정한 순증 LOC 등을 계산하고 토큰 효율(순증 LOC 대비 사용 토큰), 사용자 턴 효율(순증 LOC 대비 사용자 턴) 스코어를 함께 기록한다.
 
-\section{Experimental Setup}
+\subsection{세션별 정답 스코어 정의}
 
-The experiments were conducted on two processors: an Intel i9-13900K and an Apple M3. For the clustering quality and runtime comparisons, only the i9-13900K results are presented, as trends were consistent across both processors. Both real and synthetic 1D datasets were used, with varying sizes and numbers of clusters. The real datasets include the \texttt{iris} and \texttt{california housing} datasets from \texttt{scikit-learn}, while synthetic datasets were generated using the \texttt{sklearn.datasets.make\_blobs} and \texttt{numpy.random.random\_sample} functions.
+세션의 “정답” 스코어는 루브릭 학습 및 검증 단계에서 기준이 되는 정량 지표다. 매니페스트 생성 시 다음과 같이 계산된다.
 
-Comparisons were made against \texttt{scikit-learn}'s implementation of $k$-means\footnote{\url{https://scikit-learn.org/stable/modules/generated/sklearn.cluster.KMeans.html}} at default configuration, which utilizes greedy $k$-means++ initialization paired with Lloyd's algorithm. For fair comparison, only a single thread was used. The number of local trials for the greedy $k$-means++ initialization, $l$, defaults to $2 + \log k$ in \texttt{scikit-learn}. This was matched in \texttt{flash1dkmeans}.
+\begin{itemize}[leftmargin=*]
+    \item \textbf{토큰 효율} = 순증 LOC / 총 토큰 수. Claude Code가 생성한 최종 코드 라인 변화 대비 투입 토큰 수를 측정한다.
+    \item \textbf{사용자 턴 효율} = 순증 LOC / 사용자 턴 수. 사용자 발화 한 번당 코드 성장량을 나타낸다.
+\end{itemize}
 
-\section{Results: Clustering Quality}\label{sec:clustering_quality}
+이들 스코어는 데이터 로더를 통해 훈련·검증 파이프라인에 전달되며, 학습 시에는 상위 퍼센타일 필터 기준으로 동작하고, 검증 시에는 LLM이 예측한 총점과의 상관·오차를 계산하는 기준 값으로 사용된다.
 
-\begin{figure}[H]
-    \includegraphics[width=\textwidth]{figures/inertia_comparison.pdf}
-    \caption{Squared error comparison of the proposed two-cluster algorithm and $k$-cluster algorithms in \texttt{flash1dkmeans} against \texttt{scikit-learn} on real and synthetic datasets. Lower is better.}
-    \label{fig:inertia_comparison}
+\section{지도학습 결과}\label{sec:supervised_results}
+
+본 연구에서는 토큰 효율(\texttt{token\_efficiency})과 사용자 턴 효율(\texttt{user\_turn\_efficiency})을 목적 점수로 설정하고, 각각에 대해 상위 퍼센타일 세션으로부터 루브릭을 추출하였다. 루브릭 생성 방식으로는 LLM 기반 요약과 UMAP + HDBSCAN 기반 의미론적 군집화를 각각 적용하여 그 결과를 비교하였으며, 구체적인 루브릭 전문은 부록~\ref{appendix:token-efficiency-rubrics} 및 \ref{appendix:user-turn-efficiency-rubrics}에 수록되어 있다.
+
+\subsection{토큰 효율 기준 루브릭}
+
+\subsubsection{LLM 기반 요약 방식}
+
+상위 15 퍼센타일에 해당하는 70개 세션에서 277개의 개별 루브릭을 추출하였으며, LLM이 이들을 의미적으로 유사한 항목끼리 병합하도록 프롬프트를 구성한 결과, 최종 3개의 대표 루브릭이 도출되었다. 주요 루브릭으로는 \textbf{초기 요청의 명확성과 완결성(Clarity and Completeness of Initial Request)}, \textbf{효율적이고 실행 가능한 반복(Efficient and Actionable Iteration)}, \textbf{전략적 위임과 자율성 부여(Strategic Delegation and Autonomy Enablement)} 등이 포함되었다. 이들 루브릭은 사용자 행동의 초기 설정, 진행 중 안내, 작업 위임이라는 세 가지 핵심 단계를 포괄한다.
+
+\subsubsection{HDBSCAN 기반 군집화 방식}
+
+동일한 277개의 루브릭을 UMAP(n\_neighbors=15, n\_components=5, metric=cosine)으로 차원 축소 후 HDBSCAN(min\_cluster\_size=2)으로 군집화한 결과, 총 39개의 클러스터가 형성되었다. 이 중 가장 큰 5개의 클러스터를 선택하였으며, 군집 크기 분포는 [16, 12, 11, 10, 9]로 나타났다. 최종 5개의 루브릭은 \textbf{상위 레벨 작업 위임(High-Level Task Delegation)}, \textbf{묶음 다단계 지시(Bundled Multi-Step Instructions)}, \textbf{간결하고 구체적인 문제 보고(Concise and Specific Problem Reporting)}, \textbf{사전 설계 가이드 제시(Proactive Design Guidance)}, \textbf{AI 프로세스에 대한 최소 개입과 신뢰(Minimal Interruption \& Trust in AI's Process)}로 구성되었다.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.9\textwidth]{figures/clustering_visualization_token_efficiency.png}
+\caption{토큰 효율 기준 루브릭의 UMAP + HDBSCAN 군집화 시각화. 277개의 루브릭이 임베딩 공간에서 39개의 클러스터로 그룹화되었다.}
+\label{fig:clustering_token_efficiency}
 \end{figure}
 
-The clustering quality comparison between the proposed 2-cluster algorithm and the $k$-cluster algorithms in \texttt{flash1dkmeans} and \texttt{scikit-learn} is shown in Figure~\ref{fig:inertia_comparison}. The \texttt{iris} dataset was excluded for $k=128$ as the number of data points was insufficient. Across the configurations, the clustering quality, measured by squared error, is consistent with the baseline $k$-means algorithm. For both the 2-cluster and $k$-cluster algorithms, this confirms that the proposed method produces clustering results equivalent or close to the $k$-means algorithm in \texttt{scikit-learn}.
+HDBSCAN 방식은 의미적 밀도가 높은 항목을 중심으로 클러스터를 형성하며, LLM 요약 방식보다 더 세분화된 루브릭을 생성하는 경향을 보였다. 이는 임베딩 공간에서의 밀도 기반 군집화가 유사한 패턴을 자동으로 그룹화하면서도, LLM 요약이 통합한 일부 상위 개념을 더 구체적인 하위 패턴으로 유지하기 때문으로 해석된다.
 
-\section{Results: Runtime Performance}\label{sec:runtime_performance}
+\subsection{사용자 턴 효율 기준 루브릭}
 
-\begin{figure}[H]
-    \includegraphics[width=\textwidth]{figures/runtime_comparison.pdf}
-    \caption{Runtime comparison of the proposed two-cluster algorithm and $k$-cluster algorithms in \texttt{flash1dkmeans} against \texttt{scikit-learn} on datasets of varying sizes. Lower is better.}
-    \label{fig:runtime_comparison}
+\subsubsection{LLM 기반 요약 방식}
+
+사용자 턴 효율을 목적 점수로 설정한 경우, 상위 15 퍼센타일에 해당하는 70개 세션에서 274개의 루브릭을 추출하였으며, LLM 요약 결과 3개의 루브릭이 도출되었다. 대표적으로 \textbf{명확하고 포괄적인 초기 요청(Clear and Comprehensive Initial Request)}, \textbf{실행 가능한 반복적 안내와 피드백(Actionable Iterative Guidance and Feedback)}, \textbf{전략적 위임과 AI 자율성에 대한 신뢰(Strategic Delegation and Trust in AI Autonomy)} 등이 포함되었다. 이들 루브릭은 토큰 효율 루브릭과 유사하게 초기 요청, 진행 중 피드백, 작업 위임이라는 세 단계를 다루지만, 대화 턴 자체의 품질과 효율성을 더 강조하는 특징을 보인다.
+
+\subsubsection{HDBSCAN 기반 군집화 방식}
+
+동일한 274개의 루브릭을 UMAP(n\_neighbors=15, n\_components=5, metric=cosine)으로 차원 축소 후 HDBSCAN(min\_cluster\_size=2)으로 군집화한 결과, 총 36개의 클러스터가 형성되었다. 이 중 가장 큰 5개의 클러스터를 선택하였으며, 군집 크기 분포는 [17, 14, 14, 12, 10]으로 나타났다. 최종 5개의 대표 루브릭은 다음과 같다.
+
+\begin{itemize}[leftmargin=*]
+    \item \textbf{정확한 문제 식별(Precise Problem Identification):} 이슈나 버그를 보고할 때 정확한 문제 출력이나 구체적 맥락을 제공하여 AI가 신속히 근본 원인을 파악하도록 하는 능력을 평가한다.
+    \item \textbf{AI의 계획과 실행에 대한 신뢰(Trust in AI's Planning and Execution):} AI가 제공된 요구사항에 따라 자율적으로 계획하고 실행할 수 있도록 허용하는 사용자의 의지를 측정한다.
+    \item \textbf{명확한 작업 지시(Clear Task Directives):} 필요한 맥락과 매개변수를 포함하여 AI가 즉시 행동할 수 있는 구체적이고 잘 정의된 작업을 지시하는 능력을 평가한다.
+    \item \textbf{관련 지시 묶음(Bundling Related Instructions):} 논리적으로 연결된 지시사항이나 요구사항을 단일 메시지로 그룹화하여 AI가 여러 측면을 동시에 처리하도록 하는 능력을 측정한다.
+    \item \textbf{상위 레벨 목표 정의(High-Level Goal Definition):} 포괄적이고 복잡한 목표를 사전에 정의하여 AI가 다단계 작업을 자율적으로 계획하고 실행하도록 하는 능력을 평가한다.
+\end{itemize}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.9\textwidth]{figures/clustering_visualization_user_turn_efficiency.png}
+\caption{사용자 턴 효율 기준 루브릭의 UMAP + HDBSCAN 군집화 시각화. 274개의 루브릭이 임베딩 공간에서 36개의 클러스터로 그룹화되었다.}
+\label{fig:clustering_user_turn_efficiency}
 \end{figure}
 
-Figure~\ref{fig:runtime_comparison} compares the runtime of the proposed 2-cluster and $k$-cluster algorithms in \texttt{flash1dkmeans} to \texttt{scikit-learn}. The runtime of \texttt{flash1dkmeans} includes preprocessing time, while \texttt{flash1dkmeans\_numba} measures only the main algorithm runtime, assuming preprocessed and sorted input data. 
+사용자 턴 효율 루브릭은 토큰 효율 루브릭에 비해 대화 턴 최소화와 효율적 의사소통 패턴을 더 강조하는 경향을 보이며, 이는 두 목적 점수가 서로 다른 차원의 사용자 역량을 측정함을 시사한다.
 
-The results confirm that the $k$-cluster algorithm in \texttt{flash1dkmeans} achieves substantial runtime improvements compared to \texttt{scikit-learn}, showcasing the logarithmic dependence on dataset size. For example, for \(k=128\) and dataset size \(2^{23}\), the speedup exceeds 4500x. However, for the 2-cluster algorithm on larger datasets, the \(O(n \log n)\) preprocessing time becomes a bottleneck, limiting the overall speedup. Nevertheless, the main algorithm runtimes confirm the log-time efficiency of the proposed optimizations, and \texttt{flash1dkmeans} with the $O(n \log n)$ preprocessing still outperforms \texttt{scikit-learn} by a large margin in most cases.
+\section{검증 결과}\label{sec:validation_results}
 
-\section{Results: LLM Quantization}\label{sec:llm_quantization}
+Validation split 52개 세션에 대해 각 목적 점수 기준으로 생성된 루브릭을 적용하여 평가를 수행하였다. 루브릭 평가는 1\textasciitilde5점 스케일로 이루어지며, 목적 점수는 전체 데이터셋 내에서의 퍼센타일로 표현된다. 두 척도 간의 상관관계를 측정하기 위해 Kendall의 tau 상관계수~\cite{kendall1938new}를 사용하였다. Pearson 상관계수 대신 Kendall의 tau를 선택한 이유는 다음과 같다. 첫째, 루브릭 점수(1\textasciitilde5)와 목적 점수 퍼센타일(0\textasciitilde100)의 척도 범위가 상이하여 원점수 간 선형 관계를 직접 비교하기 어렵다. 둘째, 루브릭 점수는 이산적 서열 척도이고 목적 점수 퍼센타일은 비선형 분포를 따르므로, 두 변수 간의 단조 관계(monotonic relationship)를 측정하는 순위 기반 상관계수가 더 적합하다. 셋째, Kendall의 tau는 Spearman 상관계수에 비해 이상치에 더 강건하고, 소표본에서도 안정적인 추정치를 제공하며, 통계적 검정의 가정을 덜 요구한다는 장점이 있다~\cite{croux2010influence}.
 
-\begin{table}[H]
-    \centering
-    \resizebox{\linewidth}{!}{%
-    \begin{tabular}{|l|c c c|c c c|}
-        \cline{2-7}
-        \multicolumn{1}{c|}{} & \multicolumn{3}{c|}{\textbf{Seed (k-cluster algorithm)}} & \multicolumn{3}{c|}{\textbf{Upscale (2-cluster algorithm)}} \\
-        \hline
-        \textbf{Processor} & \textbf{sklearn} & \textbf{flash1dkmeans} & \textbf{speedup} & \textbf{sklearn} & \textbf{flash1dkmeans} & \textbf{speedup} \\
-        \hline
-        \textbf{i9-13900K} & 433 ms & 56 ms & 7.7x & 10551 ms & 34 ms & 310x \\
-        \textbf{Apple M3}  & 572 ms & 114 ms & 5.0x & 7585 ms  & 29 us & 262x \\
-        \hline
-    \end{tabular}
-    }
-    \caption{Performance comparison of \texttt{flash1dkmeans} against \texttt{scikit-learn} for both $k$-cluster and 2-cluster algorithms on i9-13900K and Apple M3 processors.}
-    \label{tab:anyprec}
+표~\ref{tab:validation_results}는 두 가지 루브릭 생성 방식(CLUSTER, LLM)과 두 가지 목적 점수(토큰 효율, 사용자 턴 효율)에 대한 검증 결과를 요약한 것이다.
+
+\begin{table}[h]
+\centering
+\caption{루브릭 생성 방식별 검증 결과}
+\label{tab:validation_results}
+\begin{tabular}{llcc}
+\hline
+\textbf{방식} & \textbf{목적 점수} & \textbf{Kendall's tau} & \textbf{p-value} \\
+\hline
+CLUSTER & 토큰 효율 & 0.1174 & 0.271 \\
+LLM & 토큰 효율 & 0.0991 & 0.330 \\
+CLUSTER & 사용자 턴 효율 & 0.0353 & 0.448 \\
+LLM & 사용자 턴 효율 & 0.0456 & 0.355 \\
+\hline
+\end{tabular}
 \end{table}
 
-Table~\ref{tab:anyprec} compares the performance of \texttt{flash1dkmeans} and \texttt{scikit-learn} in the two-step LLM quantization process proposed in Any-Precision LLM \cite{anyprec}. As an example, we quantize the 214th output channel (size 14,336) of the \texttt{mlp.down\_proj} linear module in the 8th layer of Llama-3-8B \cite{llama3} from 3-bit to 8-bit, as described in the original work. We measure the total time over 100 runs for reliability. 
+모든 경우에서 p값이 0.05를 초과하여 통계적으로 유의미한 상관관계가 발견되지 않았다. 토큰 효율 기준에서는 CLUSTER 방식이 가장 높은 tau 값(0.1174)을 기록하였으나, 여전히 약한 상관에 그쳤다.
 
-The first step involves generating a seed model using $k$-means clustering, followed by incrementally subdividing clusters into two via $k$-means in the second step. The preprocessing from the seed generation step is reusable during the upscale phase, enabling the $O(\log n)$-time 2-cluster algorithm to be particularly efficient. Results demonstrate that \texttt{flash1dkmeans} achieves remarkable speedups, surpassing 300x in the upscale step on an i9-13900K processor.
+\subsection{토큰 효율 기준 검증 결과}
 
-\section{Summary}
+\subsubsection{LLM 요약 루브릭 평가}
 
-Experimental results demonstrate that the proposed algorithms in \texttt{flash1dkmeans} achieve comparable clustering quality to \texttt{scikit-learn} while offering significant runtime improvements. The $k$-cluster algorithm exhibits logarithmic time complexity with speedups exceeding 4500x on large datasets, while the 2-cluster algorithm achieves remarkable efficiency when given preprocessed inputs. These results validate the effectiveness of the proposed optimizations for both general clustering tasks and emerging applications such as LLM quantization.
+LLM이 생성한 3개의 루브릭을 적용한 결과, Kendall의 tau는 0.0991 (p=0.330)로 나타나 통계적으로 유의미하지 않은 약한 양의 상관을 보였다. p값이 0.05보다 크므로 귀무가설(두 변수 간 상관이 없음)을 기각할 수 없으며, 이는 LLM이 의미적으로 일관된 루브릭을 생성했음에도 불구하고, 루브릭 점수가 실제 목적 점수(토큰 효율)의 순위를 예측하는 데 한계가 있음을 시사한다.
+
+\subsubsection{HDBSCAN 군집화 루브릭 평가}
+
+HDBSCAN 기반 5개 루브릭을 적용한 결과, Kendall의 tau는 0.1174 (p=0.271)로 측정되었다. LLM 방식(tau=0.0991)보다 다소 높은 상관계수를 보였으나, p값이 0.271로 여전히 통계적 유의수준(0.05)을 초과하여 귀무가설을 기각할 수 없다. 이는 의미론적 군집화가 더 세분화된 패턴을 포착하여 LLM 요약 방식보다 약간 나은 예측 경향을 보이지만, 통계적으로 유의미한 예측력을 갖지는 못함을 의미한다. 전반적으로 루브릭만으로는 토큰 효율을 정확히 예측하기 어려움을 확인할 수 있다.
+
+\subsection{사용자 턴 효율 기준 검증 결과}
+
+\subsubsection{LLM 요약 루브릭 평가}
+
+사용자 턴 효율 기준으로 LLM이 생성한 3개의 루브릭을 적용한 결과, Kendall의 tau는 0.0456 (p=0.355)로 나타났다. p값이 0.355로 통계적 유의수준을 크게 초과하여, 루브릭 점수와 사용자 턴 효율 간에 유의미한 상관관계가 없음을 보였다. 이는 사용자 턴 효율이 대화 전략과 의사소통 패턴을 직접 반영하는 지표임에도 불구하고, LLM이 생성한 질적 루브릭이 정량적 턴 효율 지표를 예측하는 데 한계가 있음을 시사한다.
+
+\subsubsection{HDBSCAN 군집화 루브릭 평가}
+
+HDBSCAN 기반 5개 루브릭을 적용한 결과, Kendall의 tau는 0.0353 (p=0.448)으로 측정되었다. LLM 방식(tau=0.0456)과 유사한 수준의 매우 약한 양의 상관을 보였으며, p값이 0.448로 통계적 유의성이 전혀 없음을 확인하였다. 토큰 효율 기준과 달리 군집화 방식이 추가적인 예측 능력 향상을 제공하지 못했으며, 이는 사용자 턴 효율 관련 루브릭이 임베딩 공간에서 명확한 군집 구조를 형성하지 못했거나, 턴 효율이라는 정량 지표와 질적 루브릭 패턴 간의 연결이 토큰 효율보다 더 약함을 의미한다.
+
+\subsection{척도 간 상관관계 해석}
+
+루브릭 점수(1\textasciitilde5 스케일)와 목적 점수 퍼센타일(실수 범위) 간의 Kendall의 tau는 전반적으로 매우 낮은 수준(0.035\textasciitilde0.117)을 보였으며, 모든 경우에서 통계적으로 유의미하지 않았다($p \leq 0.05$). 구체적으로, 토큰 효율 기준에서는 HDBSCAN 방식이 tau=0.1174 (p=0.271), LLM 방식이 tau=0.0991 (p=0.330)을 기록하였고, 사용자 턴 효율 기준에서는 LLM 방식이 tau=0.0456 (p=0.355), HDBSCAN 방식이 tau=0.0353 (p=0.448)을 기록하였다. 루브릭은 사용자 행태의 질적 패턴을 기반으로 하는 반면, 목적 점수는 코드 라인 수 변동 대비 토큰 사용량 또는 사용자 턴 수와 같은 정량 지표에 의존한다. 따라서 두 척도는 본질적으로 서로 다른 차원을 측정하며, 강한 단조 관계를 기대하기 어렵다. 토큰 효율 기준에서는 두 방식 모두 약한 양의 상관 경향을 보였으나, 사용자 턴 효율 기준에서는 상관이 거의 없는 것으로 나타났다. 이는 루브릭이 포착하는 질적 패턴이 정량적 효율 지표와 직접적인 인과관계를 갖지 않거나, 현재 목적 점수가 사용자 행태의 질을 충분히 반영하지 못함을 시사한다.
+
+\subsection{낮은 상관관계의 원인 분석 및 개선 방향}
+
+Kendall의 tau가 전반적으로 낮고 통계적으로 유의미하지 않게 나타난 이유는 다음과 같다. 첫째, 실측 스코어가 순증 LOC와 토큰/턴 수만을 반영하는 단순 지표인 반면, 루브릭은 목표 설정 명확성, 오류 처리 전략, 맥락 인식, 작업 위임 등 복합적 행태를 포착한다. 이 두 척도는 본질적으로 서로 다른 개념을 측정하며, 질적 패턴과 정량적 효율이 항상 일치하지는 않는다. 둘째, 코드 변경이 없거나 탐색 위주의 세션(순증 LOC=0)은 목적 점수가 0 또는 매우 낮게 책정되지만, 루브릭은 사용자의 질문 품질과 탐색 전략을 평가하여 상대적으로 높은 점수를 부여할 수 있다. 셋째, 순증 LOC 자체가 불안정한 지표로, 동일한 품질의 코드 작성이라도 프로젝트 특성(보일러플레이트 코드 유무, 리팩토링 여부 등)에 따라 큰 편차를 보인다. 넷째, 검증용 표본 크기(52개 세션)가 제한적이어서 통계적 검정력이 낮아졌을 가능성이 있다.
+
+이러한 간극을 줄이기 위한 개선 방향으로는 다음과 같은 접근이 필요하다. 첫째, 코드 실행 성공률, 테스트 통과율, 빌드 성공 여부 등 결과 기반 지표를 추가 목적 점수로 통합한다. 둘째, 사람이 직접 부여한 세션 품질 레이블을 수집하여 루브릭 학습의 기준으로 활용한다. 셋째, 루브릭 자체를 목적 점수 예측이 아닌 사용자 행태의 질적 평가 도구로 활용하고, 피드백 제공 목적으로 재정립한다. 이는 향후 과제로 남겨둔다.

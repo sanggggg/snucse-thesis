@@ -1,474 +1,244 @@
-\chapter*{Appendix}\label{chap:appendix}
-\addcontentsline{toc}{chapter}{Appendix}
-
-% Redefine section numbering for the appendix
-\renewcommand{\thesection}{\Alph{section}.} % Sections in appendix use A, B, C
-\setcounter{section}{0} % Reset section counter for appendix
-
-\section{$k$-Cluster Algorithm Implementation}
-\label{sec:kclustercode}
-
-Provided below is the Python 3 implementation of the $k$-cluster algorithm discussed in this work. The \texttt{Numba} and \texttt{Numpy} packages are required, as well as the definition of macros like \texttt{ARRAY\_INDEX\_DTYPE}. For the fully integrated library please refer to section \ref{sec:github}.
-
-\begin{lstlisting}[language=Python]
-@numba.njit(cache=True)
-def numba_kmeans_1d_k_cluster(
-        sorted_X,
-        n_clusters,
-        max_iter,
-        weights_prefix_sum, weighted_X_prefix_sum,
-        weighted_X_squared_prefix_sum,
-        start_idx,
-        stop_idx,
-        random_state=None,
-):
-    """An optimized kmeans for 1D data with n clusters.
-    Exploits the fact that the data is 1D to optimize the calculations.
-    Time complexity: O(k ^ 2 * log(k) * log(n) + i * log(n) * k)
-
-    Args:
-        sorted_X: np.ndarray
-            The input data. Should be sorted in ascending order.
-        n_clusters: int
-            The number of clusters to generate
-        max_iter: int
-            The maximum number of iterations to run
-        weights_prefix_sum: np.ndarray
-            The prefix sum of the weights. Should be None if the data is unweighted.
-        weighted_X_prefix_sum: np.ndarray
-            The prefix sum of the weighted X
-        weighted_X_squared_prefix_sum: np.ndarray
-            The prefix sum of the weighted X squared
-        start_idx: int
-            The start index of the range to consider
-        stop_idx: int
-            The stop index of the range to consider
-        random_state: int or None
-            The random seed to use.
-
-    Returns:
-        centroids: np.ndarray
-            The centroids of the clusters
-        cluster_borders: np.ndarray
-            The borders of the clusters
-    """
-    # set random_state
-    set_np_seed_njit(random_state)
-
-    cluster_borders = np.empty(n_clusters + 1, dtype=ARRAY_INDEX_DTYPE)
-    cluster_borders[0] = start_idx
-    cluster_borders[-1] = stop_idx
-
-    centroids = _kmeans_plusplus(
-        sorted_X, n_clusters,
-        weights_prefix_sum, weighted_X_prefix_sum,
-        weighted_X_squared_prefix_sum,
-        start_idx, stop_idx,
-    )
-    sorted_centroids = np.sort(centroids)
-
-    for _ in range(max_iter):
-        new_cluster_borders = _centroids_to_cluster_borders(sorted_X, sorted_centroids, start_idx, stop_idx)
-
-        if np.array_equal(cluster_borders, new_cluster_borders):
-            break
-
-        cluster_borders[:] = new_cluster_borders
-        for i in range(n_clusters):
-            cluster_start = cluster_borders[i]
-            cluster_end = cluster_borders[i + 1]
-
-            if cluster_end < cluster_start:
-                raise ValueError("Cluster end is less than cluster start")
-
-            if cluster_start == cluster_end:
-                continue
-
-            cluster_weighted_X_sum = query_prefix_sum(weighted_X_prefix_sum, cluster_start, cluster_end)
-            cluster_weight_sum = query_prefix_sum(weights_prefix_sum, cluster_start, cluster_end)
-
-            if cluster_weight_sum == 0:
-                # if the sum of the weights is zero, we set the centroid to the mean of the cluster
-                sorted_centroids[i] = sorted_X[cluster_start:cluster_end].mean()
-            else:
-                sorted_centroids[i] = cluster_weighted_X_sum / cluster_weight_sum
-
-    return sorted_centroids, cluster_borders
-
-
-@numba.njit(cache=True)
-def _rand_choice_prefix_sum(arr, prob_prefix_sum, start_idx, stop_idx):
-    """Randomly choose an element from arr according to the probability distribution given by prob_prefix_sum
-    
-    Time complexity: O(log n)
-
-    Args:
-        arr: np.ndarray
-            The array to choose from
-        prob_prefix_sum: np.ndarray
-            The prefix sum of the probability distribution
-        start_idx: int
-            The start index of the range to consider
-        stop_idx: int
-            The stop index of the range to consider
-
-    Returns:
-        The chosen element
-    """
-    total_prob = query_prefix_sum(prob_prefix_sum, start_idx, stop_idx)
-    selector = np.random.random_sample() * total_prob
-
-    # Because we are using start_idx as the base, but the prefix sum is calculated from 0,
-    # we need to adjust the selector if start_idx is not 0.
-    adjusted_selector = selector + prob_prefix_sum[start_idx - 1] if start_idx > 0 else selector
-
-    # Search for the index of the selector in the prefix sum, and add start_idx to get the index in the original array
-    idx = np.searchsorted(prob_prefix_sum[start_idx:stop_idx], adjusted_selector) + start_idx
-
-    return arr[idx]
-
-
-@numba.njit(cache=True)
-def _centroids_to_cluster_borders(X, sorted_centroids, start_idx, stop_idx):
-    """Converts the centroids to cluster borders.
-    The cluster borders are where the clusters are divided.
-    The centroids must be sorted.
-
-    Time complexity: O(k * log n)
-
-    Args:
-        X: np.ndarray
-            The input data. Should be sorted in ascending order.
-        sorted_centroids: np.ndarray
-            The sorted centroids
-        start_idx: int
-            The start index of the range to consider
-        stop_idx: int
-            The stop index of the range to consider
-
-    Returns:
-        np.ndarray: The cluster borders
-    """
-    midpoints = (sorted_centroids[:-1] + sorted_centroids[1:]) / 2
-    cluster_borders = np.empty(len(sorted_centroids) + 1, dtype=ARRAY_INDEX_DTYPE)
-    cluster_borders[0] = start_idx
-    cluster_borders[-1] = stop_idx
-    cluster_borders[1:-1] = np.searchsorted(X[start_idx:stop_idx], midpoints) + start_idx
-    return cluster_borders
-
-
-@numba.njit(cache=True)
-def _calculate_inertia(sorted_centroids, centroid_ranges,
-                       weights_prefix_sum, weighted_X_prefix_sum, weighted_X_squared_prefix_sum,
-                       stop_idx):
-    """Calculates the inertia of the clusters given the centroids.
-    The inertia is the sum of the squared distances of each sample to the closest centroid.
-    The calculations are done efficiently using prefix sums.
-
-    Time complexity: O(k)
-
-    Args:
-        sorted_centroids: np.ndarray
-            The centroids of the clusters
-        centroid_ranges: np.ndarray
-            The borders of the clusters
-        weights_prefix_sum: np.ndarray
-            The prefix sum of the weights. Should be None if the data is unweighted.
-        weighted_X_prefix_sum: np.ndarray
-            The prefix sum of the weighted X
-        weighted_X_squared_prefix_sum: np.ndarray
-            The prefix sum of the weighted X squared
-        stop_idx: int
-            The stop index of the range to consider
-    """
-    # inertia = sigma_i(w_i * abs(x_i - c)^2) = sigma_i(w_i * (x_i^2 - 2 * x_i * c + c^2))
-    #         = sigma_i(w_i * x_i^2) - 2 * c * sigma_i(w_i * x_i) + c^2 * sigma_i(w_i)
-    #         = sigma_i(weighted_X_squared) - 2 * c * sigma_i(weighted_X) + c^2 * sigma_i(weight)
-    #  Note that the centroid c is the CLOSEST centroid to x_i, so the above calculation must be done for each cluster
-
-    inertia = 0
-    for i in range(len(sorted_centroids)):
-        start = centroid_ranges[i]
-        end = centroid_ranges[i + 1]
-
-        if start >= stop_idx:
-            break
-        if end >= stop_idx:
-            end = stop_idx
-
-        if start == end:
-            continue
-
-        cluster_weighted_X_squared_sum = query_prefix_sum(weighted_X_squared_prefix_sum, start, end)
-        cluster_weighted_X_sum = query_prefix_sum(weighted_X_prefix_sum, start, end)
-        cluster_weight_sum = query_prefix_sum(weights_prefix_sum, start, end)
-
-        inertia += (cluster_weighted_X_squared_sum - 2 * sorted_centroids[i] * cluster_weighted_X_sum +
-                    sorted_centroids[i] ** 2 * cluster_weight_sum)
-
-    return inertia
-
-
-@numba.njit(cache=True)
-def _rand_choice_centroids(X, centroids,
-                           weights_prefix_sum, weighted_X_prefix_sum, weighted_X_squared_prefix_sum,
-                           sample_size, start_idx, stop_idx):
-    """Randomly choose sample_size elements from X, weighted by the distance to the closest centroid.
-    The weighted logic is implemented efficiently by utilizing the _calculate_inertia function.
-
-    Time complexity: O(l * k * log n)
-
-    Args:
-        X: np.ndarray
-            The input data. Should be sorted in ascending order.
-        centroids: np.ndarray
-            The centroids of the clusters
-        is_weighted: bool
-            Whether the data is weighted. If True, the weighted versions of the arrays should be provided.
-        weights_prefix_sum: np.ndarray
-            The prefix sum of the weights. Should be None if the data is unweighted.
-        weighted_X_prefix_sum: np.ndarray
-            The prefix sum of the weighted X
-        weighted_X_squared_prefix_sum: np.ndarray
-            The prefix sum of the weighted X squared
-        sample_size: int
-            The number of samples to choose
-        start_idx: int
-            The start index of the range to consider
-        stop_idx: int
-            The stop index of the range to consider
-
-    Returns:
-        np.ndarray: The chosen samples
-    """
-    sorted_centroids = np.sort(centroids)  # O(k log k)
-    cluster_borders = _centroids_to_cluster_borders(X, sorted_centroids, start_idx, stop_idx)  # O(k log n)
-    total_inertia = _calculate_inertia(sorted_centroids, cluster_borders,  # O(k)
-                                       weights_prefix_sum, weighted_X_prefix_sum,
-                                       weighted_X_squared_prefix_sum, stop_idx)
-    selectors = np.random.random_sample(sample_size) * total_inertia
-    results = np.empty(sample_size, dtype=centroids.dtype)
-
-    for i in range(sample_size):  # O(l k log n)
-        selector = selectors[i]
-        floor = start_idx + 1
-        ceiling = stop_idx
-        while floor < ceiling:
-            stop_idx_cand = (floor + ceiling) // 2
-            inertia = _calculate_inertia(sorted_centroids, cluster_borders,  # O(k)
-                                         weights_prefix_sum, weighted_X_prefix_sum,
-                                         weighted_X_squared_prefix_sum, stop_idx_cand)
-            if inertia < selector:
-                floor = stop_idx_cand + 1
-            else:
-                ceiling = stop_idx_cand
-        results[i] = X[floor - 1]
-
-    return results
-
-
-@numba.njit(cache=True)
-def _kmeans_plusplus(X, n_clusters,
-                     weights_prefix_sum, weighted_X_prefix_sum, weighted_X_squared_prefix_sum,
-                     start_idx, stop_idx):
-    """An optimized version of the kmeans++ initialization algorithm for 1D data.
-    The algorithm is optimized for 1D data and utilizes prefix sums for efficient calculations.
-
-    Time complexity: = O(k ^ 2 * log k * log n)
-
-    Args:
-        X: np.ndarray
-            The input data
-        n_clusters: int
-            The number of clusters to choose
-        weights_prefix_sum: np.ndarray
-            The prefix sum of the weights. Should be None if the data is unweighted.
-        weighted_X_prefix_sum: np.ndarray
-            The prefix sum of the weighted X
-        weighted_X_squared_prefix_sum: np.ndarray
-            The prefix sum of the weighted X squared
-
-    Returns:
-        np.ndarray: The chosen centroids
-    """
-    centroids = np.empty(n_clusters, dtype=X.dtype)
-    n_local_trials = 2 + int(np.log(n_clusters))
-
-    # First centroid is chosen randomly according to sample_weight
-    centroids[0] = _rand_choice_prefix_sum(X, weights_prefix_sum, start_idx, stop_idx)  # O(log n)
-
-    for c_id in range(1, n_clusters):  # O(k^2 l log n)
-        # Choose the next centroid randomly according to the weighted distances
-        # Sample n_local_trials candidates and choose the best one
-
-        centroid_candidates = _rand_choice_centroids(  # O(l k log n)
-            X, centroids[:c_id],
-            weights_prefix_sum, weighted_X_prefix_sum,
-            weighted_X_squared_prefix_sum, n_local_trials,
-            start_idx, stop_idx
-        )
-
-        best_inertia = np.inf
-        best_centroid = None
-        for i in range(len(centroid_candidates)): # O(l k log n)
-            # O(k log k + k log n + k) = O(k log n), as k <= n
-            centroids[c_id] = centroid_candidates[i]
-            sorted_centroids = np.sort(centroids[:c_id + 1]) # O(k log k), I think we could avoid centroid sorting and use some linear algorithm, but the gain would be minimal, especially considering that k <= n, and most times k << n
-            centroid_ranges = _centroids_to_cluster_borders(X, sorted_centroids, start_idx, stop_idx)  # O(k log n)
-            inertia = _calculate_inertia(sorted_centroids, centroid_ranges,  # O(k)
-                                         weights_prefix_sum, weighted_X_prefix_sum,
-                                         weighted_X_squared_prefix_sum, stop_idx)
-            if inertia < best_inertia:
-                best_inertia = inertia
-                best_centroid = centroid_candidates[i]
-        centroids[c_id] = best_centroid
-
-    return centroids
-\end{lstlisting}
-
-\section{2-Cluster Agorithm Implementation}
-\label{sec:2clustercode}
-
-Provided below is the Python 3 implementation of the $2$-cluster algorithm discussed in this work. The \texttt{Numba} and \texttt{Numpy} packages are required, as well as the definition of macros like \texttt{ARRAY\_INDEX\_DTYPE}. For the fully integrated library please refer to section \ref{sec:github}.
-
-\begin{lstlisting}[language=Python]
-@numba.njit(cache=True)
-def numba_kmeans_1d_two_cluster(
-        sorted_X,
-        weights_prefix_sum,
-        weighted_X_prefix_sum,
-        start_idx,
-        stop_idx,
-):
-    """An optimized kmeans for 1D data with 2 clusters, weighted version.
-    Utilizes a binary search to find the optimal division point.
-    Time complexity: O(log(n))
-
-    Args:
-        sorted_X: np.ndarray
-            The input data. Should be sorted in ascending order.
-        weights_prefix_sum: np.ndarray
-            The prefix sum of the sample weights. Should be None if the data is unweighted.
-        weighted_X_prefix_sum: np.ndarray
-            The prefix sum of (the weighted) X.
-        start_idx: int
-            The start index of the range to consider.
-        stop_idx: int
-            The stop index of the range to consider.
-
-    Returns:
-        centroids: np.ndarray
-            The centroids of the two clusters, shape (2,)
-        cluster_borders: np.ndarray
-            The borders of the two clusters, shape (3,)
-
-    WARNING: X should be sorted in ascending order before calling this function.
-    """
-    size = stop_idx - start_idx
-    centroids = np.empty(2, dtype=sorted_X.dtype)
-    cluster_borders = np.empty(3, dtype=ARRAY_INDEX_DTYPE)
-    cluster_borders[0] = start_idx
-    cluster_borders[2] = stop_idx
-    # Remember to set cluster_borders[1] as the division point
-
-    if size == 1:
-        centroids[0], centroids[1] = sorted_X[start_idx], sorted_X[start_idx]
-        cluster_borders[1] = start_idx + 1
-        return centroids, cluster_borders
-
-    if size == 2:
-        centroids[0], centroids[1] = sorted_X[start_idx], sorted_X[start_idx + 1]
-        cluster_borders[1] = start_idx + 1
-        return centroids, cluster_borders
-
-    # Now we know that there are at least 3 elements
-
-    # If the sum of the sample weight in the range is 0, we assume that the data is unweighted
-    if query_prefix_sum(weights_prefix_sum, start_idx, stop_idx) == 0:
-        # We need to recalculate the prefix sum, as previously it would have been all zeros
-        X_casted = sorted_X.astype(PREFIX_SUM_DTYPE)
-        X_prefix_sum = np.cumsum(X_casted)
-        return numba_kmeans_1d_two_cluster_unweighted(sorted_X, X_prefix_sum, start_idx, stop_idx)
-    else:
-        # Check if there is only one nonzero sample weight
-        total_weight = query_prefix_sum(weights_prefix_sum, start_idx, stop_idx)
-        sample_weight_prefix_sum_within_range = weights_prefix_sum[start_idx:stop_idx]
-        final_increase_idx = np.searchsorted(
-            sample_weight_prefix_sum_within_range,
-            sample_weight_prefix_sum_within_range[-1]
-        )
-        final_increase_amount = query_prefix_sum(weights_prefix_sum,
-                                                 start_idx + final_increase_idx,
-                                                 start_idx + final_increase_idx + 1)
-        if total_weight == final_increase_amount:
-            # If there is only one nonzero sample weight, we need to return the corresponding weight as the centroid
-            # and set all elements to the left cluster
-            nonzero_weight_index = start_idx + final_increase_idx
-            centroids[0], centroids[1] = sorted_X[nonzero_weight_index], sorted_X[nonzero_weight_index]
-            cluster_borders[1] = stop_idx
-            return centroids, cluster_borders
-
-    # Now we know that there are at least 3 elements and at least 2 nonzero weights
-
-    # KMeans with 2 clusters on 1D data is equivalent to finding a division point.
-    # The division point can be found by doing a binary search on the prefix sum.
-
-    # We will do a search for the division point,
-    # where we search for the optimum number of elements in the first cluster
-    # We don't want empty clusters, so we set the floor and ceiling to start_idx + 1 and stop_idx - 1
-    floor = start_idx + 1
-    ceiling = stop_idx - 1
-    left_centroid = None
-    right_centroid = None
-
-    while floor < ceiling:
-        division_point = (floor + ceiling) // 2
-        # If the left cluster has no weight, we need to move the floor up
-        left_weight_sum = query_prefix_sum(weights_prefix_sum, start_idx, division_point)
-        if left_weight_sum == 0:
-            floor = division_point + 1
-            continue
-        right_weight_sum = query_prefix_sum(weights_prefix_sum, division_point, stop_idx)
-        # If the right cluster has no weight, we need to move the ceiling down
-        if right_weight_sum == 0:
-            ceiling = division_point - 1
-            continue
-
-        left_centroid = query_prefix_sum(weighted_X_prefix_sum, start_idx, division_point) / left_weight_sum
-        right_centroid = query_prefix_sum(weighted_X_prefix_sum, division_point, stop_idx) / right_weight_sum
-
-        new_division_point_value = (left_centroid + right_centroid) / 2
-        if sorted_X[division_point - 1] <= new_division_point_value:
-            if new_division_point_value <= sorted_X[division_point]:
-                # The new division point matches the previous one, so we can stop
-                break
-            else:
-                floor = division_point + 1
-        else:
-            ceiling = division_point - 1
-
-    # recalculate division point based on final floor and ceiling
-    division_point = (floor + ceiling) // 2
-
-    # initialize variables in case the loop above does not run through
-    if left_centroid is None:
-        left_centroid = (query_prefix_sum(weighted_X_prefix_sum, start_idx, division_point) /
-                         query_prefix_sum(weights_prefix_sum, start_idx, division_point))
-    if right_centroid is None:
-        right_centroid = (query_prefix_sum(weighted_X_prefix_sum, division_point, stop_idx) /
-                          query_prefix_sum(weights_prefix_sum, division_point, stop_idx))
-
-    # avoid using lists to allow numba.njit
-    centroids[0] = left_centroid
-    centroids[1] = right_centroid
-
-    cluster_borders[1] = division_point
-    return centroids, cluster_borders
-\end{lstlisting}
-
-\section{Library Implementation}
-\label{sec:github}
-The algorithms detailed in this thesis have been published open-source as \texttt{flash1dkmeans}.
-
-\noindent Github respository: \url{https://github.com/SyphonArch/flash1dkmeans} \newline
-\texttt{PyPI}: \url{https://pypi.org/project/flash1dkmeans/}
+\chapter*{부록}\label{chap:appendix}
+\addcontentsline{toc}{chapter}{부록}
+
+% Appendix content placeholder
+\section{Rubric Extraction Prompt Template}\label{appendix:rubric-extraction}
+
+\begin{tcolorbox}[colback=gray!5!white, colframe=gray!70!black, title=Rubric Extraction Prompt]
+\small
+You are an expert at analyzing AI agent interactions and identifying patterns that indicate high-quality user behavior.
+
+Analyze the following chat session between a human user (messages with \texttt{role: user}) and an AI coding assistant. This session has been rated as high-quality. All rubrics you extract must describe only the human user's behavior—never the AI assistant's actions.
+
+\textbf{Chat Session} \\
+\texttt{\{chat\_session\}}
+
+\textbf{Task} \\
+Extract a list of evaluation rubrics that capture what makes this user interaction effective. Focus on:
+\begin{itemize}
+    \item How clearly the user communicated their requirements
+    \item How efficiently the user guided the AI toward the solution
+    \item How well the user handled clarifications and corrections
+    \item Any patterns of effective AI agent usage
+\end{itemize}
+
+\textbf{Output Format} \\
+Provide your response as a JSON array of rubrics. Each rubric should have:
+\begin{itemize}
+    \item name: Short descriptive name (2-5 words)
+    \item description: What this rubric measures (1-2 sentences)
+    \item scoring\_criteria: How to score from 1 (poor) to 5 (excellent)
+    \item evidence: Specific example from this session demonstrating the rubric
+\end{itemize}
+
+Extract \{extraction\_min\_rubrics\}-\{extraction\_max\_rubrics\} rubrics that are specific and actionable.
+\end{tcolorbox}
+
+\section{Rubric Summarization Prompt Template}\label{appendix:rubric-merge}
+
+\begin{tcolorbox}[colback=gray!5!white, colframe=gray!70!black, title=Rubric Summarization Prompt]
+\small
+You are an expert at synthesizing evaluation criteria for AI agent interactions.
+
+You have been given rubrics extracted from multiple high-quality chat sessions. Your task is to consolidate these into a final, coherent set of evaluation rubrics that assess only the human user (messages labeled \texttt{role: user}) and never the AI assistant.
+
+\textbf{Extracted Rubrics from All Sessions} \\
+\texttt{\{all\_rubrics\}}
+
+\textbf{Task} \\
+Create a final list of \{summarization\_min\_rubrics\}-\{summarization\_max\_rubrics\} evaluation rubrics by:
+\begin{enumerate}
+    \item Identifying common themes across the extracted rubrics
+    \item Merging similar or overlapping rubrics
+    \item Removing redundant or overly specific rubrics
+    \item Ensuring comprehensive coverage of user efficiency aspects
+    \item Making criteria clear and consistently scorable
+\end{enumerate}
+
+\textbf{Output Format} \\
+Provide your response as a JSON object with the final rubrics. Ensure each rubric:
+\begin{itemize}
+    \item Has a unique, descriptive name
+    \item Has clear, objective scoring criteria
+    \item Is applicable across different types of coding tasks
+    \item Focuses exclusively on the human USER (messages with \texttt{role: user}), not AI performance
+\end{itemize}
+\end{tcolorbox}
+
+\section{Token Efficiency Rubrics}\label{appendix:token-efficiency-rubrics}
+
+\subsection{LLM Summarization Method (3 rubrics)}
+
+\begin{enumerate}
+    \item \textbf{Clarity and Completeness of Initial Request} \\
+    \textit{Description:} The user provides a complete, clear, and well-structured initial request, including all necessary context, goals, constraints, and desired output formats, enabling the AI to immediately understand the task and formulate an actionable plan without extensive clarification. \\
+    \textit{Scoring Criteria:}
+    \begin{itemize}
+        \item 1: Vague, ambiguous, or highly incomplete initial request, requiring multiple turns for basic understanding and task setup.
+        \item 2: Provides basic requirements but lacks significant context, constraints, or specific details, leading to moderate clarification.
+        \item 3: Sets a clear goal and provides some context, but still requires the AI to infer details or ask for minor clarifications on constraints or output.
+        \item 4: Delivers clear and comprehensive initial requirements, with most essential information provided upfront, allowing the AI to form a good plan.
+        \item 5: Consistently provides highly detailed, structured, and self-contained initial requests that anticipate potential issues and constraints, enabling the AI to autonomously plan and execute complex tasks with minimal or no initial clarification.
+    \end{itemize}
+
+    \item \textbf{Efficient and Actionable Iteration} \\
+    \textit{Description:} The user provides concise, timely, and actionable feedback, corrections, and follow-up instructions, leveraging AI's context and previous output, bundling related requests, and efficiently guiding the AI's iterative process with minimal conversational overhead. This includes precise and timely course correction. \\
+    \textit{Scoring Criteria:}
+    \begin{itemize}
+        \item 1: Feedback is vague, delayed, fragmented, or redundant; requires extensive AI clarification or re-states information already known.
+        \item 2: Provides basic feedback or answers, but often requires follow-ups, lacks specificity, or fails to leverage AI's context effectively.
+        \item 3: Delivers generally clear and timely feedback/answers, but could be more concise, proactive in bundling instructions, or precise in error correction.
+        \item 4: Consistently provides clear, specific, and timely feedback, often bundling related instructions or corrections, and leverages AI's context effectively.
+        \item 5: Provides immediate, precise, and minimal feedback, corrections, and consolidated answers to AI queries, directly leveraging AI's previous output and context to efficiently steer the conversation and rectify errors with minimal token waste.
+    \end{itemize}
+
+    \item \textbf{Strategic Delegation and Autonomy Enablement} \\
+    \textit{Description:} The user effectively delegates complex, multi-step tasks at a high conceptual level, provides strategic input, and allows the AI sufficient autonomy to plan and execute, minimizing micro-management and maximizing AI's analytical and generative potential. \\
+    \textit{Scoring Criteria:}
+    \begin{itemize}
+        \item 1: Micro-manages the AI, breaks down complex tasks into overly granular steps, or frequently interrupts AI's workflow, failing to leverage its autonomous capabilities.
+        \item 2: Delegates simple tasks but struggles with complex ones, or intervenes frequently with unnecessary checks, not fully trusting AI's autonomy.
+        \item 3: Delegates moderately complex tasks and provides some strategic input, but may occasionally interrupt AI's autonomy or miss opportunities for deeper leveraging.
+        \item 4: Effectively delegates complex tasks, provides relevant strategic guidance (e.g., external references, design patterns), and generally allows the AI to execute autonomously.
+        \item 5: Consistently delegates highly complex, multi-faceted tasks with clear output specifications, proactively provides strategic context and design principles, and trusts the AI to autonomously plan and execute, maximizing AI's analytical and generative potential.
+    \end{itemize}
+\end{enumerate}
+
+\subsection{HDBSCAN Clustering Method (5 rubrics)}
+
+\begin{enumerate}
+    \item \textbf{High-Level Task Delegation} \\
+    \textit{Description:} Measures how effectively the user delegates large, multi-step tasks to the AI, relying on the AI's ability to interpret and execute based on existing context (e.g., a plan document). This minimizes the need for the user to break down complex tasks into granular steps. \\
+    \textit{Scoring Criteria:}
+    \begin{itemize}
+        \item 1: User breaks down every step, requiring explicit instructions for each.
+        \item 3: User delegates moderate tasks but still provides significant detail.
+        \item 5: User delegates entire phases or large features with minimal explicit instruction, trusting the AI to manage sub-tasks.
+    \end{itemize}
+
+    \item \textbf{Bundled Multi-Step Instructions} \\
+    \textit{Description:} Evaluates the user's ability to combine multiple related, sequential, or parallel tasks into a single, coherent prompt, minimizing turn overhead and allowing the AI to plan and execute a sequence of actions efficiently. \\
+    \textit{Scoring Criteria:}
+    \begin{itemize}
+        \item 1: Each action is requested in a separate turn, leading to excessive back-and-forth.
+        \item 3: Some related actions are grouped, but complex sequences are still broken down.
+        \item 5: User effectively bundles several distinct but related instructions into one prompt, often including context or examples for each sub-task, enabling the AI to perform a complex operation without further prompting.
+    \end{itemize}
+
+    \item \textbf{Concise and Specific Problem Reporting} \\
+    \textit{Description:} The user provides direct and unambiguous descriptions of observed problems or error messages, allowing the AI to quickly identify the root cause without requesting further diagnostic information. \\
+    \textit{Scoring Criteria:}
+    \begin{itemize}
+        \item 1: Vague or incomplete problem descriptions requiring extensive AI clarification.
+        \item 3: Adequate problem descriptions.
+        \item 5: Precise error messages or behavioral descriptions that immediately guide the AI to a solution.
+    \end{itemize}
+
+    \item \textbf{Proactive Design Guidance} \\
+    \textit{Description:} Evaluates the user's ability to provide forward-looking context or requirements that influence the AI's design choices for reusability or extensibility, preventing future refactoring. \\
+    \textit{Scoring Criteria:}
+    \begin{itemize}
+        \item 1: User only addresses immediate needs, leading to potential rework for future extensions.
+        \item 3: User hints at future needs but doesn't fully articulate them.
+        \item 5: User explicitly states future use cases or design principles, allowing the AI to create a more robust and adaptable solution from the start.
+    \end{itemize}
+
+    \item \textbf{Minimal Interruption \& Trust in AI's Process} \\
+    \textit{Description:} The user allows the AI to execute its planned steps without unnecessary interruptions, redundant checks, or premature requests for status updates, demonstrating trust in the AI's ability to follow through. \\
+    \textit{Scoring Criteria:}
+    \begin{itemize}
+        \item 1: Frequent interruptions, asking for status updates, or re-stating instructions already given.
+        \item 3: Occasional interruptions or minor redundant checks.
+        \item 5: User intervenes only when necessary (e.g., to correct a mistake or add a new task), allowing the AI to work through its plan efficiently.
+    \end{itemize}
+\end{enumerate}
+
+\section{User Turn Efficiency Rubrics}\label{appendix:user-turn-efficiency-rubrics}
+
+\subsection{LLM Summarization Method (3 rubrics)}
+
+\begin{enumerate}
+    \item \textbf{Clear and Comprehensive Initial Request} \\
+    \textit{Description:} Evaluates the user's ability to provide a complete, unambiguous, and actionable initial request, including all necessary context, goals, constraints, and desired output structure, enabling the AI to form a robust plan and begin substantial work without immediate clarification. \\
+    \textit{Scoring Criteria:}
+    \begin{itemize}
+        \item 1: Provides minimal or vague information, requiring extensive clarification (multiple turns) for the AI to understand the basic task, context, or desired output.
+        \item 2: Provides some basic information, but critical context, constraints, or output details are missing, leading to several clarification turns.
+        \item 3: Provides most key details, but some ambiguities or minor gaps remain, necessitating a few clarification turns or assumptions by the AI.
+        \item 4: Provides a thorough initial request, including clear goals, relevant context, and most constraints, allowing the AI to proceed with minimal or no clarification.
+        \item 5: Provides an exceptionally detailed, well-structured, and unambiguous initial request, covering all essential context, specific goals, critical constraints, and desired output format, enabling the AI to autonomously generate a comprehensive plan or significant output immediately.
+    \end{itemize}
+
+    \item \textbf{Actionable Iterative Guidance and Feedback} \\
+    \textit{Description:} Assesses the user's ability to provide clear, concise, and consolidated feedback, corrections, and new instructions during the interaction. This includes comprehensively answering AI's clarifying questions, providing specific diagnostic information, and maintaining an efficient conversation flow. \\
+    \textit{Scoring Criteria:}
+    \begin{itemize}
+        \item 1: Provides vague, fragmented, or overly emotional feedback/instructions, requiring multiple turns for the AI to understand the problem or desired change. Answers AI questions individually or incompletely, or introduces new, unrequested topics.
+        \item 2: Identifies issues but lacks specificity or bundles unrelated points, leading to minor AI confusion or requiring follow-up questions. Answers to AI questions are often incomplete or verbose.
+        \item 3: Provides generally clear feedback/instructions and answers most AI questions in one turn, but might miss some details, opportunities to bundle related points, or consistently leverage implicit context.
+        \item 4: Consistently provides clear, specific, and timely feedback/instructions, often bundling related points. Answers AI questions comprehensively in single turns, allowing immediate AI action.
+        \item 5: Provides exceptionally precise, concise, and consolidated feedback, corrections, or new instructions, often including rationale, specific examples, or actionable diagnostic data. Responds to all AI clarifying questions completely and unambiguously in a single turn, leveraging implicit context, and enabling immediate and accurate AI action.
+    \end{itemize}
+
+    \item \textbf{Strategic Delegation and Trust in AI Autonomy} \\
+    \textit{Description:} Evaluates the user's skill in delegating complex tasks at a high level, providing sufficient information for the AI to plan and execute autonomously, and refraining from micro-management. This includes proactive problem framing, solution suggestion, and challenging AI assumptions to achieve optimal solutions. \\
+    \textit{Scoring Criteria:}
+    \begin{itemize}
+        \item 1: Micro-manages the AI, providing step-by-step instructions for every small action, or frequently interrupts the AI's workflow, preventing autonomous progress. Fails to proactively frame problems or suggest solutions.
+        \item 2: Delegates some sub-tasks but frequently intervenes with detailed instructions or checks in often, slowing down autonomous execution. Provides vague problem framing or unhelpful suggestions.
+        \item 3: Allows the AI some autonomy for sub-tasks but might still provide unnecessary guidance or check-ins during execution. Frames problems with basic context or offers general solution ideas.
+        \item 4: Delegates significant multi-step tasks at a high level, allowing the AI to plan and execute without constant intervention. Proactively frames problems with relevant context or offers specific, relevant hypotheses.
+        \item 5: Consistently delegates major phases of a project with clear, high-level directives, trusting the AI to autonomously plan, execute, and problem-solve over many turns without interruption. Proactively provides precise technical hypotheses, solution suggestions, or authoritative references, significantly accelerating problem resolution and guiding towards architecturally sound solutions.
+    \end{itemize}
+\end{enumerate}
+
+\subsection{HDBSCAN Clustering Method (5 rubrics)}
+
+\begin{enumerate}
+    \item \textbf{Precise Problem Identification} \\
+    \textit{Description:} When reporting an issue or bug, the user provides exact problematic output or specific context, enabling the AI to quickly locate and address the root cause without extensive diagnostic queries. \\
+    \textit{Scoring Criteria:}
+    \begin{itemize}
+        \item 1: User describes a problem vaguely, requiring the AI to ask many clarifying questions.
+        \item 2: User provides a general description, but the AI struggles to pinpoint the exact issue.
+        \item 3: User describes the problem with some detail, allowing the AI to narrow down the search.
+        \item 4: User provides specific symptoms or partial output, guiding the AI effectively.
+        \item 5: User provides the exact problematic output or code snippet, allowing the AI to directly search for and resolve the issue.
+    \end{itemize}
+
+    \item \textbf{Trust in AI's Planning and Execution} \\
+    \textit{Description:} Assesses the user's willingness to allow the AI to autonomously plan and execute tasks based on the provided requirements, without excessive interruptions, micro-management, or requests for intermediate updates. \\
+    \textit{Scoring Criteria:}
+    \begin{itemize}
+        \item 1: User constantly interrupts, micro-manages, or demands frequent updates, hindering AI's flow.
+        \item 3: User provides some space but still frequently checks in or asks for minor adjustments during execution.
+        \item 5: User provides clear instructions and then allows the AI to proceed with its plan, only intervening for significant new requirements or when prompted by the AI.
+    \end{itemize}
+
+    \item \textbf{Clear Task Directives} \\
+    \textit{Description:} Measures how effectively the user directs the AI to a specific, well-defined task, including necessary context and parameters, to enable immediate action without requiring the AI to ask "what next?". \\
+    \textit{Scoring Criteria:}
+    \begin{itemize}
+        \item 1: Vague or ambiguous instructions that require multiple clarification rounds.
+        \item 3: Clear but requires minor AI clarification or prioritization.
+        \item 5: Precise, self-contained directives that allow the AI to execute complex tasks without further user input.
+    \end{itemize}
+
+    \item \textbf{Bundling Related Instructions} \\
+    \textit{Description:} This rubric measures how well the user groups logically connected instructions or requirements into a single message, allowing the AI to process and act on multiple aspects of the task simultaneously rather than in fragmented exchanges. \\
+    \textit{Scoring Criteria:}
+    \begin{itemize}
+        \item 1: User provides instructions one at a time, even when related.
+        \item 3: User occasionally bundles instructions but often separates them.
+        \item 5: User consistently groups related requirements, clarifications, or modifications into single, coherent messages, maximizing the AI's ability to make progress in one turn.
+    \end{itemize}
+
+    \item \textbf{High-Level Goal Definition} \\
+    \textit{Description:} Measures how effectively the user defines a broad, complex objective upfront, enabling the AI to plan and execute multi-step tasks autonomously without requiring detailed instructions for each sub-step. \\
+    \textit{Scoring Criteria:}
+    \begin{itemize}
+        \item 1: User provides fragmented, unclear, or overly narrow initial requests, requiring extensive clarification.
+        \item 3: User provides a clear goal but might miss some key aspects, leading to moderate clarification.
+        \item 5: User articulates a comprehensive, high-level goal that allows the AI to take ownership of planning and execution without further input on the overall objective.
+    \end{itemize}
+\end{enumerate}
